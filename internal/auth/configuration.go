@@ -43,6 +43,8 @@ import (
 // PROVIDER_*_OKTA_URL
 // PROVIDER_*_OKTA_SERVER
 //
+// PROVIDER_*_COGNITO_URL
+//
 // PROVIDER_*_GROUPCACHE_INTERVAL_REFRESH
 // PROVIDER_*_GROUPCACHE_INTERVAL_PROVIDER
 //
@@ -132,6 +134,7 @@ var (
 	_ Validator = MetricsConfig{}
 	_ Validator = GoogleProviderConfig{}
 	_ Validator = OktaProviderConfig{}
+	_ Validator = AmazonCognitoProviderConfig{}
 	_ Validator = CookieConfig{}
 	_ Validator = TimeoutConfig{}
 	_ Validator = StatsdConfig{}
@@ -189,8 +192,9 @@ type ProviderConfig struct {
 	Scope        string       `mapstructure:"scope"`
 
 	// provider specific
-	GoogleProviderConfig GoogleProviderConfig `mapstructure:"google"`
-	OktaProviderConfig   OktaProviderConfig   `mapstructure:"okta"`
+	GoogleProviderConfig        GoogleProviderConfig        `mapstructure:"google"`
+	OktaProviderConfig          OktaProviderConfig          `mapstructure:"okta"`
+	AmazonCognitoProviderConfig AmazonCognitoProviderConfig `mapstructure:"cognito"`
 
 	// caching
 	GroupCacheConfig GroupCacheConfig `mapstructure:"groupcache"`
@@ -218,6 +222,10 @@ func (pc ProviderConfig) Validate() error {
 	case "okta":
 		if err := pc.OktaProviderConfig.Validate(); err != nil {
 			return xerrors.Errorf("invalid provider.okta config: %w", err)
+		}
+	case "cognito":
+		if err := pc.AmazonCognitoProviderConfig.Validate(); err != nil {
+			return xerrors.Errorf("invalid provider.cognito config: %w", err)
 		}
 	case "test":
 		break
@@ -269,6 +277,18 @@ func (opc OktaProviderConfig) Validate() error {
 
 	if opc.ServerID == "" {
 		return xerrors.New("no okta.server is configured")
+	}
+
+	return nil
+}
+
+type AmazonCognitoProviderConfig struct {
+	OrgURL string `mapstructure:"url"`
+}
+
+func (acpc AmazonCognitoProviderConfig) Validate() error {
+	if opc.OrgURL == "" {
+		return xerrors.New("no cognito.url is configured")
 	}
 
 	return nil
