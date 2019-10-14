@@ -15,6 +15,7 @@ import (
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
 	"github.com/buzzfeed/sso/internal/pkg/options"
 	"github.com/buzzfeed/sso/internal/pkg/sessions"
+	"github.com/buzzfeed/sso/internal/pkg/templates"
 	"github.com/buzzfeed/sso/internal/proxy/providers"
 
 	"github.com/datadog/datadog-go/statsd"
@@ -179,7 +180,7 @@ func NewOAuthProxy(opts *Options, optFuncs ...func(*OAuthProxy) error) (*OAuthPr
 		Validators:   []options.Validator{},
 
 		redirectURL: &url.URL{Path: "/oauth2/callback"},
-		templates:   getTemplates(),
+		templates:   templates.NewHTMLTemplate(),
 
 		skipAuthPreflight: opts.SkipAuthPreflight,
 		passAccessToken:   opts.PassAccessToken,
@@ -229,14 +230,23 @@ func NewOAuthProxy(opts *Options, optFuncs ...func(*OAuthProxy) error) (*OAuthPr
 
 // Handler returns a http handler for an OAuthProxy
 func (p *OAuthProxy) Handler() http.Handler {
+	logger := log.NewLogEntry()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/favicon.ico", p.Favicon)
 	mux.HandleFunc("/robots.txt", p.RobotsTxt)
 	mux.HandleFunc("/oauth2/v1/certs", p.Certs)
-	mux.HandleFunc("/oauth2/sign_out", p.SignOut)
+	mux.HandleFunc("/oauth2/sign_out", p.SignOutPage)
 	mux.HandleFunc("/oauth2/callback", p.OAuthCallback)
 	mux.HandleFunc("/oauth2/auth", p.AuthenticateOnly)
 	mux.HandleFunc("/", p.Proxy)
+
+	// load static files
+	fsHandler, err := loadFSHandler()
+	if err != nil {
+		logger.Fatal(err)
+	}
+	mux.Handle("/static/", http.StripPrefix("/static/", fsHandler))
 
 	// Global middleware, which will be applied to each request in reverse
 	// order as applied here (i.e., we want to validate the host _first_ when
@@ -334,6 +344,95 @@ func (p *OAuthProxy) XHRError(rw http.ResponseWriter, req *http.Request, code in
 	rw.Write(jsonBytes)
 }
 
+type signInResp struct {
+	ProviderSlug string
+	EmailDomains []string
+	ClientID     string
+	Action       string
+	Redirect     string
+	Destination  string
+	Version      string
+	SignInParams providers.SignInParams
+}
+
+// SignInPage renders a sign in page stating the in-use provider and email domains,
+// and redirects to sso_auth.
+func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, state string) {
+
+	// this forms req.Host + /oauth2/callback
+	callbackURL := p.GetRedirectURL(req.Host)
+
+	// this forms the sso-auth signin URL + callbackURL as the redirect URL,
+	// + other parameters (client id, scope etc)
+	signInURL, signInParams := p.provider.GetSignInURL(callbackURL, state)
+
+	// validateRedirectURI middleware already ensures that this is a valid URL
+
+	t := signInResp{
+		ProviderSlug: strings.Title(p.provider.Data().ProviderSlug),
+		EmailDomains: p.upstreamConfig.AllowedEmailDomains,
+		Action:       signInURL.String(),
+		Destination:  callbackURL.Host,
+		Version:      VERSION,
+		SignInParams: signInParams,
+	}
+	p.templates.ExecuteTemplate(rw, "sign_in.html", t)
+}
+
+type signOutResp struct {
+	ProviderSlug  string
+	Version       string
+	Action        string
+	Message       string
+	Destination   string
+	Email         string
+	SignOutParams providers.SignOutParams
+}
+
+// SignOutPage renders a sign out page
+func (p *OAuthProxy) SignOutPage(rw http.ResponseWriter, req *http.Request) {
+	session, err := p.sessionStore.LoadSession(req)
+	if err != nil {
+		// TODO: What do we want the flow to be in this situation?
+		// Render an error page, redirect to redirectURL, render sign in page
+		p.ErrorPage(rw, req, http.StatusInternalServerError, "Internal Error", err.Error())
+		return
+	}
+
+	// Build redirect URI from request host
+	var scheme string
+	scheme = req.URL.Scheme
+	if req.URL.Scheme == "" {
+		if p.cookieSecure {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+
+	redirectURL := &url.URL{
+		Scheme: scheme,
+		Host:   req.Host,
+		Path:   "/",
+	}
+
+	signOutURL, signOutParams := p.provider.GetSignOutURL(redirectURL)
+	destinationURL, _ := url.Parse(signOutURL.String())
+
+	t := signOutResp{
+		ProviderSlug:  strings.Title(p.provider.Data().ProviderSlug),
+		Version:       VERSION,
+		Action:        signOutURL.String(),
+		Destination:   destinationURL.Host,
+		Email:         session.Email,
+		SignOutParams: signOutParams,
+	}
+
+	p.sessionStore.ClearSession(rw, req)
+	p.templates.ExecuteTemplate(rw, "sign_out.html", t)
+	return
+}
+
 // ErrorPage renders an error page with a given status code, title, and message.
 func (p *OAuthProxy) ErrorPage(rw http.ResponseWriter, req *http.Request, code int, title string, message string) {
 	if p.isXHR(req) {
@@ -379,30 +478,6 @@ func (p *OAuthProxy) isXHR(req *http.Request) bool {
 	return req.Header.Get("X-Requested-With") == "XMLHttpRequest"
 }
 
-// SignOut redirects the request to the provider's sign out url.
-func (p *OAuthProxy) SignOut(rw http.ResponseWriter, req *http.Request) {
-	p.sessionStore.ClearSession(rw, req)
-
-	var scheme string
-
-	// Build redirect URI from request host
-	if req.URL.Scheme == "" {
-		if p.cookieSecure {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
-	}
-
-	redirectURL := &url.URL{
-		Scheme: scheme,
-		Host:   req.Host,
-		Path:   "/",
-	}
-	fullURL := p.provider.GetSignOutURL(redirectURL)
-	http.Redirect(rw, req, fullURL.String(), http.StatusFound)
-}
-
 // OAuthStart begins the authentication flow, encrypting the redirect url in a request to the provider's sign in endpoint.
 func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, tags []string) {
 	// The proxy redirects to the authenticator, and provides it with redirectURI (which points
@@ -417,7 +492,6 @@ func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, tags 
 	}
 
 	requestURI := req.URL.String()
-	callbackURL := p.GetRedirectURL(req.Host)
 
 	// We redirect the browser to the authenticator with a 302 status code. The target URL is
 	// constructed using the GetSignInURL() method, which encodes the following data:
@@ -471,9 +545,8 @@ func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, tags 
 		return
 	}
 
-	signinURL := p.provider.GetSignInURL(callbackURL, encryptedState)
-	logger.WithSignInURL(signinURL).Info("starting OAuth flow")
-	http.Redirect(rw, req, signinURL.String(), http.StatusFound)
+	logger.Info("redirecting to sign in page")
+	p.SignInPage(rw, req, encryptedState)
 }
 
 // OAuthCallback validates the cookie sent back from the provider, then validates
