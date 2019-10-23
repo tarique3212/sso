@@ -4,17 +4,19 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/buzzfeed/sso/internal/auth"
-	log "github.com/buzzfeed/sso/internal/pkg/logging"
+	"github.com/buzzfeed/sso/internal/pkg/httpserver"
+	"github.com/buzzfeed/sso/internal/pkg/logging"
 )
 
 func init() {
-	log.SetServiceName("sso-authenticator")
+	logging.SetServiceName("sso-authenticator")
 }
 
 func main() {
-	logger := log.NewLogEntry()
+	logger := logging.NewLogEntry()
 
 	config, err := auth.LoadConfig()
 	if err != nil {
@@ -42,9 +44,12 @@ func main() {
 	}
 	defer authMux.Stop()
 
+	requestTimeout := config.ServerConfig.TimeoutConfig.Request
+	shutdownTimeout := requestTimeout + 1*time.Second
+
 	// we leave the message field blank, which will inherit the stdlib timeout page which is sufficient
 	// and better than other naive messages we would currently place here
-	timeoutHandler := http.TimeoutHandler(authMux, config.ServerConfig.TimeoutConfig.Request, "")
+	timeoutHandler := http.TimeoutHandler(authMux, requestTimeout, "")
 
 	s := &http.Server{
 		Addr:         fmt.Sprintf(":%d", config.ServerConfig.Port),
@@ -53,5 +58,7 @@ func main() {
 		Handler:      auth.NewLoggingHandler(os.Stdout, timeoutHandler, config.LoggingConfig.Enable, statsdClient),
 	}
 
-	logger.Fatal(s.ListenAndServe())
+	if err := httpserver.Run(s, shutdownTimeout, logger); err != nil {
+		logger.WithError(err).Fatal("error running server")
+	}
 }
