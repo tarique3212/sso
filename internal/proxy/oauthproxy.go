@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -60,7 +59,7 @@ type OAuthProxy struct {
 	cookieSecure bool
 	Validators   []options.Validator
 	redirectURL  *url.URL // the url to receive requests at
-	templates    *template.Template
+	templates    templates.Template
 
 	skipAuthPreflight bool
 	passAccessToken   bool
