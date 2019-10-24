@@ -357,6 +357,8 @@ type signInResp struct {
 // SignInPage renders a sign in page stating the in-use provider and email domains,
 // and redirects to sso_auth.
 func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, state string) {
+	//TODO: Is this what we want?
+	rw.WriteHeader(http.StatusFound)
 
 	// this forms req.Host + /oauth2/callback
 	callbackURL := p.GetRedirectURL(req.Host)

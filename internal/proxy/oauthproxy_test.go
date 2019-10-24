@@ -1076,8 +1076,24 @@ func TestSecurityHeaders(t *testing.T) {
 				body, err := ioutil.ReadAll(resp.Body)
 				defer resp.Body.Close()
 				testutil.Assert(t, err == nil, "could not read http response body: %v", err)
-				if string(body) != tc.path {
-					t.Errorf("expected body = %q, got %q", tc.path, string(body))
+
+				actualBody := string(body)
+				expectedBody := tc.path
+				// if the request is not authenticated (it has no proxy session),
+				// we expect a sign in page to be rendered.
+				if !tc.authenticated {
+					expectedBody = "Sign in with"
+					if !strings.Contains(actualBody, expectedBody) {
+						t.Logf("expected body to contain: %q", expectedBody)
+						t.Logf("          got: %q", actualBody)
+						t.Errorf("received invalid body")
+					}
+				} else {
+					if actualBody != expectedBody {
+						t.Logf("expected body: %q", expectedBody)
+						t.Logf("          got: %q", actualBody)
+						t.Errorf("received invalid body")
+					}
 				}
 			}
 
